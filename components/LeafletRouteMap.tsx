@@ -9,46 +9,24 @@ interface RelationMember {
   role: string;
   geometry?: { lat: number; lon: number }[];
 }
-
 interface OverpassRelation {
   type: 'relation';
   id: number;
-  tags?: {
-    route?: string;
-    name?: string;
-    'name:ko'?: string;
-    'name:en'?: string;
-    colour?: string;
-    color?: string;
-    ref?: string;
-  };
+  tags?: { route?: string; name?: string; 'name:ko'?: string; 'name:en'?: string; colour?: string; color?: string; ref?: string };
   members: RelationMember[];
 }
-
 interface OverpassNode {
   type: 'node';
   id: number;
   lat: number;
   lon: number;
-  tags?: {
-    name?: string;
-    'name:ko'?: string;
-    'name:en'?: string;
-    railway?: string;
-  };
+  tags?: { name?: string; 'name:ko'?: string; 'name:en'?: string; railway?: string };
 }
 
-interface Props {
-  prefectureId: string;
-  showBus?: boolean;
-}
+interface Props { prefectureId: string }
 
 const RAIL_COLORS: Record<string, string> = {
-  subway:     '#7c9ff5',
-  tram:       '#4ade80',
-  light_rail: '#c084fc',
-  monorail:   '#94a3b8',
-  rail:       '#60a5fa',
+  subway: '#7c9ff5', tram: '#4ade80', light_rail: '#c084fc', monorail: '#94a3b8', rail: '#60a5fa',
 };
 const RAIL_WEIGHT: Record<string, number> = {
   subway: 4, tram: 3, light_rail: 3, monorail: 3, rail: 2,
@@ -59,23 +37,47 @@ function resolveName(tags?: { name?: string; 'name:ko'?: string; 'name:en'?: str
   return tags['name:ko'] ?? tags['name:en'] ?? tags.name ?? tags.ref ?? '';
 }
 
-// 캐시
-const railCache = new Map<string, OverpassRelation[]>();
+// 여러 Overpass 서버를 순서대로 시도 (장애·차단 대비)
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
+];
+
+async function overpassFetch(query: string): Promise<any> {
+  let lastErr: unknown;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 40000);
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+    }
+  }
+  throw lastErr ?? new Error('Overpass API 연결 실패');
+}
+
+const railCache    = new Map<string, OverpassRelation[]>();
 const stationCache = new Map<string, OverpassNode[]>();
-const busCache = new Map<string, OverpassRelation[]>();
+const busCache     = new Map<string, OverpassRelation[]>();
 
 async function fetchRail(lat: number, lon: number, prefId: string): Promise<OverpassRelation[]> {
   if (railCache.has(prefId)) return railCache.get(prefId)!;
-  const query = `
-    [out:json][timeout:40];
+  const data = await overpassFetch(`
+    [out:json][timeout:35];
     relation["route"~"subway|tram|light_rail|monorail"]["type"="route"](around:40000,${lat},${lon});
     out geom;
-  `;
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST', body: `data=${encodeURIComponent(query)}`,
-  });
-  if (!res.ok) throw new Error('Overpass error');
-  const data = await res.json();
+  `);
   const result = (data.elements ?? []).filter((el: any) => el.type === 'relation');
   railCache.set(prefId, result);
   return result;
@@ -83,51 +85,44 @@ async function fetchRail(lat: number, lon: number, prefId: string): Promise<Over
 
 async function fetchStations(lat: number, lon: number, prefId: string): Promise<OverpassNode[]> {
   if (stationCache.has(prefId)) return stationCache.get(prefId)!;
-  const query = `
-    [out:json][timeout:25];
-    node["railway"~"station|stop"](around:40000,${lat},${lon});
-    out;
-  `;
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST', body: `data=${encodeURIComponent(query)}`,
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  const result = (data.elements ?? []).filter((el: any) => el.type === 'node');
-  stationCache.set(prefId, result);
-  return result;
+  try {
+    const data = await overpassFetch(`
+      [out:json][timeout:20];
+      node["railway"~"station|stop"](around:40000,${lat},${lon});
+      out;
+    `);
+    const result = (data.elements ?? []).filter((el: any) => el.type === 'node');
+    stationCache.set(prefId, result);
+    return result;
+  } catch { return []; }
 }
 
 async function fetchBus(lat: number, lon: number, prefId: string): Promise<OverpassRelation[]> {
   const key = prefId + '_bus';
   if (busCache.has(key)) return busCache.get(key)!;
-  // 반경 8km — 버스는 데이터가 매우 많으므로 좁게 제한
-  const query = `
-    [out:json][timeout:30];
-    relation["route"="bus"]["type"="route"](around:8000,${lat},${lon});
-    out geom;
-  `;
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST', body: `data=${encodeURIComponent(query)}`,
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  const result = (data.elements ?? []).filter((el: any) => el.type === 'relation');
-  busCache.set(key, result);
-  return result;
+  try {
+    const data = await overpassFetch(`
+      [out:json][timeout:25];
+      relation["route"="bus"]["type"="route"](around:8000,${lat},${lon});
+      out geom;
+    `);
+    const result = (data.elements ?? []).filter((el: any) => el.type === 'relation');
+    busCache.set(key, result);
+    return result;
+  } catch { return []; }
 }
 
-export default function LeafletRouteMap({ prefectureId, showBus = false }: Props) {
+export default function LeafletRouteMap({ prefectureId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef       = useRef<any>(null);
   const busLayerRef  = useRef<any>(null);
   const [status, setStatus]         = useState<'loading' | 'done' | 'empty' | 'error'>('loading');
+  const [errMsg, setErrMsg]         = useState('');
   const [busLoading, setBusLoading] = useState(false);
   const [busVisible, setBusVisible] = useState(false);
 
   const center = PREFECTURE_CENTERS[prefectureId] ?? [35.68, 139.69];
 
-  // 초기 철도 + 역 마커 로드
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
     let cancelled = false;
@@ -139,8 +134,8 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
       const map = L.map(containerRef.current, { zoomControl: false }).setView(center, 12);
       mapRef.current = map;
 
-      // 모달 애니메이션 완료 후 컨테이너 크기 재계산 (프로덕션에서 필수)
-      setTimeout(() => map.invalidateSize(), 150);
+      // 모달 애니메이션 완료 후 크기 재계산
+      setTimeout(() => { if (!cancelled) map.invalidateSize(); }, 200);
 
       L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
         attribution: '© <a href="https://carto.com/">CARTO</a> © <a href="https://www.openstreetmap.org">OSM</a>',
@@ -158,9 +153,8 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
 
         const allLatLngs: any[] = [];
 
-        // 철도 노선
         relations.forEach((rel) => {
-          const route = rel.tags?.route ?? 'rail';
+          const route  = rel.tags?.route ?? 'rail';
           const color  = rel.tags?.colour ?? rel.tags?.color ?? RAIL_COLORS[route] ?? '#94a3b8';
           const weight = RAIL_WEIGHT[route] ?? 2;
           const name   = resolveName(rel.tags);
@@ -169,7 +163,10 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
           rel.members.forEach((m) => {
             if (m.type !== 'way' || !m.geometry?.length) return;
             const coords = m.geometry.map(p => [p.lat, p.lon] as [number, number]);
-            if (coords.length >= 2) { segs.push(coords); allLatLngs.push(...coords.map(([a, b]) => L.latLng(a, b))); }
+            if (coords.length >= 2) {
+              segs.push(coords);
+              allLatLngs.push(...coords.map(([a, b]) => L.latLng(a, b)));
+            }
           });
           if (segs.length === 0) return;
 
@@ -178,39 +175,28 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
           poly.addTo(map);
         });
 
-        // 역 마커 (현재 줌 13 이상에서만 표시)
-        const stationIcon = (railway: string) => L.circleMarker([0, 0], {
-          radius: railway === 'station' ? 5 : 3,
-          fillColor: '#fff',
-          color: '#334155',
-          weight: 1.5,
-          fillOpacity: 1,
-        });
-
+        // 역 마커 (줌 12 이상에서만)
         const stationGroup = L.layerGroup().addTo(map);
         stations.forEach((node) => {
-          const name = resolveName(node.tags);
+          const name   = resolveName(node.tags);
+          const radius = node.tags?.railway === 'station' ? 5 : 3;
           const marker = L.circleMarker([node.lat, node.lon], {
-            radius: node.tags?.railway === 'station' ? 5 : 3,
-            fillColor: '#ffffff',
-            color: '#334155',
-            weight: 1.5,
-            fillOpacity: 1,
+            radius, fillColor: '#ffffff', color: '#334155', weight: 1.5, fillOpacity: 1,
           });
           if (name) marker.bindTooltip(name, { sticky: true, className: 'route-tooltip', direction: 'top', offset: [0, -6] });
           marker.addTo(stationGroup);
         });
-
-        // 줌 레벨 12 미만에서 역 마커 숨기기
         map.on('zoomend', () => {
-          if (map.getZoom() < 12) stationGroup.remove();
-          else stationGroup.addTo(map);
+          map.getZoom() < 12 ? stationGroup.remove() : stationGroup.addTo(map);
         });
 
         if (allLatLngs.length > 0) map.fitBounds(L.latLngBounds(allLatLngs), { padding: [28, 28] });
         setStatus('done');
-      } catch {
-        if (!cancelled) setStatus('error');
+      } catch (e: any) {
+        if (!cancelled) {
+          setErrMsg(e?.message ?? '알 수 없는 오류');
+          setStatus('error');
+        }
       }
     })();
 
@@ -220,22 +206,19 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
     };
   }, [prefectureId]);
 
-  // 버스 레이어 토글
   const toggleBus = async () => {
     if (!mapRef.current) return;
     const L = (await import('leaflet')).default;
-
     if (busVisible) {
       busLayerRef.current?.remove();
       busLayerRef.current = null;
       setBusVisible(false);
       return;
     }
-
     setBusLoading(true);
     try {
       const routes = await fetchBus(center[0], center[1], prefectureId);
-      const group = L.layerGroup().addTo(mapRef.current);
+      const group  = L.layerGroup().addTo(mapRef.current);
       routes.forEach((rel) => {
         const name = resolveName(rel.tags);
         const segs: [number, number][][] = [];
@@ -260,7 +243,6 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
     <div className="relative w-full h-full">
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* 버스 토글 버튼 */}
       {status === 'done' && (
         <button
           onClick={toggleBus}
@@ -280,7 +262,7 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ background: 'rgba(248,249,250,0.92)' }}>
           <div className="w-8 h-8 border-2 border-slate-300 border-t-indigo-500 rounded-full animate-spin" />
           <p className="text-slate-600 text-sm font-medium">노선 데이터 불러오는 중…</p>
-          <p className="text-slate-400 text-xs">OpenStreetMap에서 가져오는 중 (최대 40초)</p>
+          <p className="text-slate-400 text-xs">3개 서버를 순서대로 시도 중 (최대 40초)</p>
         </div>
       )}
       {status === 'empty' && (
@@ -289,8 +271,10 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
         </div>
       )}
       {status === 'error' && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(248,249,250,0.6)' }}>
-          <p className="text-red-500 text-sm">데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.</p>
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 pointer-events-none" style={{ background: 'rgba(248,249,250,0.85)' }}>
+          <p className="text-red-500 text-sm font-medium">노선 데이터를 불러오지 못했습니다</p>
+          <p className="text-slate-400 text-xs">모든 Overpass API 서버에 연결 실패</p>
+          {errMsg && <p className="text-slate-400 text-[11px] font-mono">{errMsg}</p>}
         </div>
       )}
     </div>
