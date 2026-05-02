@@ -134,11 +134,13 @@ export default function LeafletRouteMap({ prefectureId, showBus = false }: Props
 
     (async () => {
       const L = (await import('leaflet')).default;
-      await import('leaflet/dist/leaflet.css' as any);
       if (cancelled || !containerRef.current) return;
 
       const map = L.map(containerRef.current, { zoomControl: false }).setView(center, 12);
       mapRef.current = map;
+
+      // 모달 애니메이션 완료 후 컨테이너 크기 재계산 (프로덕션에서 필수)
+      setTimeout(() => map.invalidateSize(), 150);
 
       L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
         attribution: '© <a href="https://carto.com/">CARTO</a> © <a href="https://www.openstreetmap.org">OSM</a>',
