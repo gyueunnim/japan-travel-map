@@ -56,7 +56,7 @@ const busCache     = new Map<string, OverpassRelation[]>();
 async function fetchRail(lat: number, lon: number, prefId: string): Promise<OverpassRelation[]> {
   if (railCache.has(prefId)) return railCache.get(prefId)!;
   const data = await overpassFetch(`
-    [out:json][timeout:35];
+    [out:json][timeout:25];
     relation["route"~"subway|tram|light_rail|monorail"]["type"="route"](around:40000,${lat},${lon});
     out geom;
   `);
