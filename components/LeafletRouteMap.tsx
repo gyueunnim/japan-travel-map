@@ -37,34 +37,16 @@ function resolveName(tags?: { name?: string; 'name:ko'?: string; 'name:en'?: str
   return tags['name:ko'] ?? tags['name:en'] ?? tags.name ?? tags.ref ?? '';
 }
 
-// 여러 Overpass 서버를 순서대로 시도 (장애·차단 대비)
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.openstreetmap.ru/api/interpreter',
-];
-
+// 브라우저에서 Overpass API를 직접 호출하면 CORS 차단됨
+// → Next.js 서버사이드 프록시(/api/overpass)를 통해 우회
 async function overpassFetch(query: string): Promise<any> {
-  let lastErr: unknown;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 40000);
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (e) {
-      clearTimeout(timer);
-      lastErr = e;
-    }
-  }
-  throw lastErr ?? new Error('Overpass API 연결 실패');
+  const res = await fetch('/api/overpass', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `data=${encodeURIComponent(query)}`,
+  });
+  if (!res.ok) throw new Error(`프록시 오류: HTTP ${res.status}`);
+  return await res.json();
 }
 
 const railCache    = new Map<string, OverpassRelation[]>();
